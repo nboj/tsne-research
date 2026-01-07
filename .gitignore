@@ -29,3 +29,5 @@
 # typescript
 ./frontend/*.tsbuildinfo
 ./frontend/next-env.d.ts
+
+./backend/coco_embeddings.json
