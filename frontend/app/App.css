@@ -29,7 +29,7 @@
   
   .app {
     display: grid;
-    grid-template-columns: 360px 1fr 360px;
+    grid-template-columns: 360px 1fr;
     grid-template-rows: auto 1fr;
     gap: 12px;
     padding: 14px;
@@ -60,6 +60,7 @@
     box-shadow: 0 1px 0 rgba(20, 20, 30, 0.04);
     padding: 12px;
     min-height: 0;
+  width: 100%;
   }
   
   .left {

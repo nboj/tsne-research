@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as d3 from "d3";
 
 const COLORS = [
@@ -15,6 +15,7 @@ const COLORS = [
 type NodeDatum = d3.SimulationNodeDatum & {
   id: string;
   winner: number;
+  path: string;
   max_similarity?: number;
 };
 
@@ -27,7 +28,7 @@ type LinkDatum = {
 // What D3’s forceLink mutates into at runtime:
 type SimLink = d3.SimulationLinkDatum<NodeDatum> & { weight: number };
 
-type Data = {
+export type Data = {
   queries: string[];
   nodes: {
     id: string;
@@ -64,6 +65,8 @@ export default function ScatterView({ data }: Props) {
   const linkGRef = useRef<SVGGElement | null>(null);
   const nodeGRef = useRef<SVGGElement | null>(null);
   const labelGRef = useRef<SVGGElement | null>(null);
+
+  const [selectedNode, setSelectedNode] = useState<NodeDatum>();
 
   // selections used by the tick handler (MUST be refs)
   const nodeSelRef = useRef<d3.Selection<
@@ -159,6 +162,7 @@ export default function ScatterView({ data }: Props) {
       const created: NodeDatum = {
         id: n.id,
         winner: n.winner ?? 0,
+        path: n.path,
         max_similarity: n.max_similarity,
         x: width / 2 + (Math.random() - 0.5) * 80,
         y: height / 2 + (Math.random() - 0.5) * 80,
@@ -395,6 +399,11 @@ export default function ScatterView({ data }: Props) {
             d.fy = null;
           }),
       );
+      nodeSel.on("click", (event, d) => {
+        setSelectedNode(d);
+        event.stopPropagation(); // prevents zoom background clicks
+        console.log("Clicked node:", d.id, d);
+      });
     }
 
     return () => {
@@ -409,5 +418,29 @@ export default function ScatterView({ data }: Props) {
     };
   }, []);
 
-  return <svg ref={svgRef} style={{ width: "100%", height: "auto" }} />;
+  const [fullscreen, setFullscreen] = useState<boolean>(false);
+
+  return (
+    <>
+      {selectedNode && (
+        <div className="absolute top-[1rem] left-[1rem]">
+          <img
+            src={`http://127.0.0.1:5000${selectedNode.path}`}
+            onClick={() => setFullscreen(prev => !prev)}
+            className="static top-0 right-0 left-0 bottom-0 z-100"
+            width={100}
+            height={100}
+            style={
+              fullscreen
+                ? { position: "fixed", margin: "auto", width: "calc(100vw - 2rem)", height: "calc(100vh - 2rem)", objectFit: "cover" }
+                : { objectFit: "cover" }
+            }
+          />
+          <p>Winner: {data.queries[selectedNode.winner]}</p>
+          <p>Similarity: {selectedNode.max_similarity}</p>
+        </div>
+      )}
+      <svg ref={svgRef} style={{ width: "100%", height: "auto" }} />
+    </>
+  );
 }

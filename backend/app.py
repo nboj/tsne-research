@@ -1,4 +1,5 @@
-from typing import Any, Dict, List, Literal, Optional, Set, Tuple, TypedDict, cast
+import os
+from typing import Any, Literal, TypedDict, cast
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 
@@ -6,7 +7,7 @@ import torch
 import clip
 import json
 import numpy as np
-from sklearn.manifold import TSNE
+# from sklearn.manifold import TSNE
 
 
 app = Flask(__name__)
@@ -16,13 +17,12 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 model, _ = clip.load("ViT-B/32", device=device)
 
 
-with open("./coco_embeddings.json", "r") as f:
+with open("./coco/image_clip_b32.json", "r") as f:
     data = json.load(f)
 
-image_embeddings = np.array([d["image_embedding"] for d in data], dtype=np.float32)
+image_embeddings = np.array([d["embedding"] for d in data], dtype=np.float32)
 image_paths = [d["image_path"] for d in data]
 
-# normalize once (important)
 image_embeddings /= np.linalg.norm(image_embeddings, axis=1, keepdims=True)
 
 
@@ -62,20 +62,34 @@ def graph():
     if not queries:
         return jsonify({"error": "queries required"}), 400
 
-    # ---- knobs to keep D3 happy ----
+    # after normalizing image_embeddings and inside encode_text after normalizing vecs:
+
+    print("image norms:", image_embeddings.shape,
+          float(np.min(np.linalg.norm(image_embeddings, axis=1))),
+          float(np.max(np.linalg.norm(image_embeddings, axis=1))))
+
+    q_emb = encode_texts(queries)
+    print("text norms:",
+          float(np.min(np.linalg.norm(q_emb, axis=1))),
+          float(np.max(np.linalg.norm(q_emb, axis=1))))
+
+    sim_iq = image_embeddings @ q_emb.T
+    print("sim range:", float(sim_iq.min()), float(sim_iq.max()))
+
+    # knobs
     top_n: int = int(payload.get("top_n", 400))              # max images returned
     per_query_n: int = int(payload.get("per_query_n", 0))    # union top per query (recommended)
     min_img_sim: float = float(payload.get("min_img_sim", 0.2))  # threshold in query-score space
     k_neighbors: int = int(payload.get("k_neighbors", 6))    # edges per node (kNN), keeps graph sparse
 
-    # ---- image-query similarity matrix ----
+    # image similarity
     q_emb: np.ndarray = encode_texts(queries)           # (Q, D)
     sim_iq: np.ndarray = image_embeddings @ q_emb.T     # (N, Q)
 
     n_images: int = sim_iq.shape[0]
     n_queries: int = sim_iq.shape[1]
 
-    # ---- choose a subset of images to render ----
+    # choosing image subset
     if per_query_n > 0:
         per_query_n = max(1, min(per_query_n, n_images))
         chosen_set: set[int] = set()
@@ -93,13 +107,19 @@ def graph():
         top_n = max(1, min(top_n, n_images))
         chosen = np.argpartition(-scores, top_n - 1)[:top_n].astype(np.int32)
 
-    # subset sim vectors: (M, Q)
     V: np.ndarray = sim_iq[chosen]
 
     # normalize in query-score space so dot == cosine similarity of "query response profiles"
-    Vn: np.ndarray = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-12)
+    mu = V.mean(axis=0, keepdims=True)
+    sd = V.std(axis=0, keepdims=True) + 1e-12
+    Vz = (V - mu) / sd
+    Vn = Vz / (np.linalg.norm(Vz, axis=1, keepdims=True) + 1e-12)
+    S = Vn @ Vn.T
+    #Vn: np.ndarray = V / (np.linalg.norm(V, axis=1, keepdims=True) + 1e-12)
+    #S: np.ndarray = Vn @ Vn.T
+    print(V)
 
-    # ---- build nodes (images only) ----
+    # building image nodes
     nodes: list[Node] = []
     max_idx: np.ndarray = np.argmax(V, axis=1)
     max_val: np.ndarray = np.max(V, axis=1)
@@ -107,18 +127,23 @@ def graph():
     for row, img_i in enumerate(chosen):
         i = int(img_i)
         scores_map: dict[str, float] = {queries[j]: float(V[row, j]) for j in range(n_queries)}
+        raw = str(image_paths[i]).replace("\\", "/").lstrip("./")
+
+        if raw.startswith("coco/"):
+            raw = raw[len("coco/"):]
+
+        path=f"/backend/coco/{raw}"
         nodes.append(Node(
             id=f"img_{i}",
             type="image",
-            path=image_paths[i],
+            path=path,
             winner=int(max_idx[row]),
             max_similarity=float(max_val[row]),
             scores=scores_map,
         ))
 
-    # ---- build edges between images based on similarity in query-score space ----
-    # M x M similarity; only do this on the chosen subset (M is your render limit)
-    S: np.ndarray = Vn @ Vn.T
+    # building edeges based on query scores
+    # M x M similarity;
     np.fill_diagonal(S, -np.inf)
 
     M: int = S.shape[0]
@@ -131,7 +156,7 @@ def graph():
         if k_neighbors == 0:
             break
         nbrs = np.argpartition(-S[a], k_neighbors - 1)[:k_neighbors]
-        # sort neighbors by strength (optional)
+        # sort neighbors by strength
         nbrs = nbrs[np.argsort(-S[a, nbrs])]
 
         for b in nbrs:
@@ -164,6 +189,23 @@ def graph():
             "min_img_sim": float(min_img_sim),
         }
     })
+
+from flask import send_from_directory, abort
+
+COCO_ROOT = os.path.abspath("./coco")
+
+@app.get("/backend/coco/<path:relpath>")
+def serve_coco(relpath: str):
+    full = os.path.abspath(os.path.join(COCO_ROOT, relpath))
+
+    if not full.startswith(COCO_ROOT + os.sep):
+        abort(400)
+
+    if not os.path.isfile(full):
+        abort(404)
+
+    return send_from_directory(os.path.dirname(full), os.path.basename(full))
+
 
 if __name__ == "__main__":
     print("Running on http://127.0.0.1:5000")
